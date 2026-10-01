@@ -1,0 +1,9 @@
+# Instagram Reel Bot — Dependencies
+# ──────────────────────────────────
+httpx>=0.27.0             # async HTTP client (OpenRouter, SiliconFlow, Supabase, file.io)
+python-dotenv>=1.0.0      # .env file loader
+edge-tts>=6.1.0           # Microsoft Edge TTS (free, no API key)
+moviepy>=2.0.0            # video/audio merging & encoding
+pillow>=10.0.0            # image processing & Ken Burns framing
+fastapi>=0.111.0          # Webhook API framework for Auto-Inbox agent
+uvicorn[standard]>=0.29.0 # ASGI web server for Webhook listener
