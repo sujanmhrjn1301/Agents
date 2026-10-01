@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import random
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +24,7 @@ from .video import generate_video
 from .editor import merge_reel
 from .uploader import upload_reel, delete_remote_reel
 from .publisher import publish_reel
+from .scheduler import get_or_create_schedule, NEPAL_TZ
 from .config import cfg
 from .logger import log
 
@@ -155,63 +155,46 @@ def _cleanup_run_dir(run_dir: Path) -> None:
 
 async def run_forever(fast_test: bool = False) -> None:
     """
-    Smart scheduler — posts reels at random times within three daily windows:
+    Smart scheduler — posts reels at fixed (but randomised-once) times within
+    three daily windows:
 
       Window 1 — Morning   : 09:00 – 12:00  (Nepal Time)
       Window 2 — Afternoon : 13:00 – 15:00  (Nepal Time)
       Window 3 — Evening   : 20:00 – 23:00  (Nepal Time)
 
-    A random minute is chosen within each window every day.
+    Times are randomly chosen ONCE per day and stored in Supabase.
+    Restarting the bot does NOT change today's schedule.
     Ctrl-C exits gracefully.
     """
-    # Nepal Standard Time = UTC + 5h 45m
-    NEPAL_TZ = timezone(timedelta(hours=5, minutes=45))
-
-    # Upload windows defined as (start_hour, end_hour) inclusive on start
-    WINDOWS: list[tuple[str, int, int]] = [
-        ("Morning",   9,  12),
-        ("Afternoon", 13, 15),
-        ("Evening",   20, 23),
-    ]
-
-    def _random_slot_today(now: datetime, start_h: int, end_h: int) -> datetime:
-        """Return a random datetime within [start_h:00, end_h:00) on the same calendar day as now."""
-        rand_minute = random.randint(0, (end_h - start_h) * 60 - 1)
-        slot = now.replace(hour=start_h, minute=0, second=0, microsecond=0)
-        slot += timedelta(minutes=rand_minute)
-        return slot
-
-    def _next_slots(now: datetime) -> list[tuple[str, datetime]]:
-        """
-        Return all upcoming (name, datetime) upload slots starting from `now`,
-        ordered chronologically. If a window has already passed today, schedule
-        it for tomorrow instead.
-        """
-        slots: list[tuple[str, datetime]] = []
-        for name, start_h, end_h in WINDOWS:
-            candidate = _random_slot_today(now, start_h, end_h)
-            if candidate <= now:
-                # Window already passed today — push to tomorrow
-                candidate += timedelta(days=1)
-            slots.append((name, candidate))
-        return sorted(slots, key=lambda x: x[1])
-
     log.info("=" * 65)
     log.info("📅 AutoReel Smart Scheduler — Window-Based Posting (Nepal Time)")
     log.info("   Window 1 — Morning   : 09:00 – 12:00")
     log.info("   Window 2 — Afternoon : 13:00 – 15:00")
     log.info("   Window 3 — Evening   : 20:00 – 23:00")
-    log.info("   3 reels per day, randomised within each window.")
+    log.info("   Schedule is FIXED per day — stored in Supabase.")
     log.info("=" * 65)
 
     while True:
         now = datetime.now(NEPAL_TZ)
-        upcoming = _next_slots(now)
 
-        # Log today's full schedule
-        log.info("🗓️  Today's upload schedule (Nepal Time):")
-        for name, slot in upcoming:
-            log.info("      %-12s → %s", name, slot.strftime("%I:%M %p"))
+        # Load or create today's persistent schedule from Supabase
+        schedule = get_or_create_schedule()
+
+        # Build list of upcoming slots (skip any that have already passed today)
+        upcoming: list[tuple[str, datetime]] = []
+        for name, slot in schedule.as_list():
+            if slot > now:
+                upcoming.append((name, slot))
+            else:
+                log.info("   ⏭️  %s slot (%s) already passed — skipping.", name, slot.strftime("%I:%M %p"))
+
+        if not upcoming:
+            # All 3 slots already passed — wait until midnight + 1 min, then recalculate
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
+            wait_secs = (tomorrow - now).total_seconds()
+            log.info("🌙 All windows done for today. Waiting until tomorrow (%s NPT)…", tomorrow.strftime("%Y-%m-%d %I:%M %p"))
+            await asyncio.sleep(wait_secs)
+            continue
 
         for name, slot in upcoming:
             now = datetime.now(NEPAL_TZ)
@@ -237,6 +220,10 @@ async def run_forever(fast_test: bool = False) -> None:
             else:
                 log.warning("⚠️  Reel pipeline failed during %s window.", name)
 
-        # All 3 windows for today done — loop back to recalculate tomorrow
-        log.info("🌙 All windows done for today. Recalculating tomorrow's schedule…")
+        # All pending windows done — wait until tomorrow then recalculate
+        now = datetime.now(NEPAL_TZ)
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
+        wait_secs = (tomorrow - now).total_seconds()
+        log.info("🌙 All windows done for today. Waiting until tomorrow (%s NPT)…", tomorrow.strftime("%Y-%m-%d %I:%M %p"))
+        await asyncio.sleep(wait_secs)
 
