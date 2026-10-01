@@ -97,3 +97,37 @@ async def _upload_fileio(file_path: Path) -> str:
     url = data["link"]
     log.info("✅ Uploaded to file.io → %s", url)
     return url
+
+
+# ── Cleanup: Delete from Supabase after Instagram finished publishing ───
+
+async def delete_remote_reel(public_url: str) -> None:
+    """
+    Delete the video from Supabase Storage once Instagram has finished processing it.
+    Keeps Supabase storage usage near 0 MB.
+    """
+    if not (cfg.supabase_url and cfg.supabase_service_role_key):
+        return  # file.io auto-deletes on download
+
+    bucket = cfg.supabase_storage_bucket
+    prefix = f"{cfg.supabase_url}/storage/v1/object/public/{bucket}/"
+    if not public_url.startswith(prefix):
+        return
+
+    object_name = public_url[len(prefix):]
+    delete_url = f"{cfg.supabase_url}/storage/v1/object/{bucket}/{object_name}"
+    headers = {
+        "Authorization": f"Bearer {cfg.supabase_service_role_key}",
+        "apikey": cfg.supabase_service_role_key,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.delete(delete_url, headers=headers)
+            if resp.status_code in (200, 204):
+                log.info("🗑️  Deleted video from Supabase Storage (%s) — freed storage space", object_name)
+            else:
+                log.warning("⚠️ Could not delete %s from Supabase (%d): %s", object_name, resp.status_code, resp.text)
+    except Exception as exc:
+        log.warning("⚠️ Failed to delete video from Supabase: %s", exc)
+

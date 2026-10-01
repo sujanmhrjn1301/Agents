@@ -23,7 +23,7 @@ from .brain import generate_reel_plan
 from .voice import generate_voice
 from .video import generate_video
 from .editor import merge_reel
-from .uploader import upload_reel
+from .uploader import upload_reel, delete_remote_reel
 from .publisher import publish_reel
 from .config import cfg
 from .logger import log
@@ -108,7 +108,8 @@ async def run_once(fast_test: bool = False) -> dict:
         log.info("[+] PIPELINE COMPLETE -- Media ID: %s", media_id)
         log.info("=" * 60)
 
-        # ── Auto-cleanup: remove large media files after successful publish ──
+        # ── Auto-cleanup: remove large media files & delete from Supabase ──
+        await delete_remote_reel(public_url)
         _cleanup_run_dir(run_dir)
 
     except Exception as exc:
