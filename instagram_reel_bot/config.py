@@ -60,6 +60,7 @@ class Config:
 
     # ── Model / endpoint tunables ────────────────────────────────────────
     openrouter_model: str = field(default_factory=lambda: os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini"))
+    openrouter_video_model: str = field(default_factory=lambda: os.getenv("OPENROUTER_VIDEO_MODEL", "bytedance/seedance-2.0-fast"))
 
     # ── TTS defaults ─────────────────────────────────────────────────────
     tts_voice: str = "en-US-ChristopherNeural"  # male; swap for "en-US-JennyNeural" etc.

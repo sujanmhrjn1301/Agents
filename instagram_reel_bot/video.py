@@ -205,6 +205,87 @@ async def _fetch_openrouter_image(
     return False
 
 
+async def _generate_openrouter_seedance_video(
+    prompt: str,
+    output_path: Path,
+    poll_interval: int = 10,
+    timeout: int = 300,
+) -> bool:
+    """
+    Generate an authentic AI video clip using ByteDance SeaDance on OpenRouter.
+    Uses the /api/v1/videos endpoint with asynchronous polling.
+    """
+    if not cfg.openrouter_api_key:
+        return False
+
+    model_name = getattr(cfg, "openrouter_video_model", "bytedance/seedance-2.0-fast")
+    headers = {
+        "Authorization": f"Bearer {cfg.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://instagram-reel-bot.local",
+    }
+    payload = {
+        "model": model_name,
+        "prompt": f"{prompt}, 9:16 vertical composition, cinematic 8k masterpiece",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post("https://openrouter.ai/api/v1/videos", headers=headers, json=payload)
+            if resp.status_code not in (200, 201, 202):
+                log.warning("OpenRouter SeaDance init error (%d): %s", resp.status_code, resp.text[:200])
+                return False
+
+            init_data = resp.json()
+            polling_url = init_data.get("polling_url")
+            gen_id = init_data.get("id")
+
+            if not polling_url and gen_id:
+                polling_url = f"https://openrouter.ai/api/v1/videos/{gen_id}"
+
+            if not polling_url:
+                log.warning("OpenRouter SeaDance response missing polling_url: %s", init_data)
+                return False
+
+            log.info("   ⏳ OpenRouter SeaDance generation started (id=%s)...", gen_id)
+
+            elapsed = 0
+            while elapsed < timeout:
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+
+                poll_resp = await client.get(polling_url, headers=headers)
+                if poll_resp.status_code != 200:
+                    continue
+
+                poll_data = poll_resp.json()
+                status = poll_data.get("status", "").lower()
+
+                if status in ("completed", "succeeded", "success"):
+                    # Extract video URL
+                    video_url = poll_data.get("video_url") or poll_data.get("output_url")
+                    if not video_url and "data" in poll_data:
+                        video_url = poll_data["data"].get("video_url") or poll_data["data"].get("url")
+
+                    if video_url:
+                        vid_resp = await client.get(video_url)
+                        if vid_resp.status_code == 200:
+                            output_path.write_bytes(vid_resp.content)
+                            log.info("   ✅ SeaDance video clip downloaded (%.1fs)", elapsed)
+                            return True
+
+                elif status in ("failed", "error"):
+                    log.warning("OpenRouter SeaDance failed: %s", poll_data.get("error"))
+                    return False
+
+                log.info("   ⏳ SeaDance status: %s (%ds elapsed)...", status, elapsed)
+
+    except Exception as exc:
+        log.warning("OpenRouter SeaDance video generation error: %s", exc)
+
+    return False
+
+
 def _create_fallback_canvas(prompt: str, output_path: Path, width: int = 720, height: int = 1280) -> None:
     """Create a high-quality stylized local canvas if all remote image APIs fail."""
     img = Image.new("RGB", (width, height), color=(18, 14, 28))
@@ -577,6 +658,48 @@ async def generate_fast_test_video(output_path: Path | None = None) -> Path:
     return output_path
 
 
+async def generate_multi_scene_seedance_video(
+    scenes: list[dict],
+    output_path: Path | None = None,
+) -> Path:
+    """
+    ByteDance SeaDance Video Engine via OpenRouter:
+      1. Generates authentic AI video clips directly for each scene using bytedance/seedance-2.0-fast.
+      2. If any clip fails, seamlessly falls back to FLUX + Ken Burns motion.
+      3. Stitches all clips together with smooth crossfades.
+    """
+    if output_path is None:
+        output_path = cfg.output_dir / "video.mp4"
+
+    run_dir = output_path.parent
+    scenes_dir = run_dir / "scenes"
+    scenes_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info("🎬 Launching ByteDance SeaDance AI Video Engine for %d scenes...", len(scenes))
+
+    clip_paths: list[Path] = []
+    for i, scene in enumerate(scenes):
+        clip_path = scenes_dir / f"scene_{i+1:02d}.mp4"
+        prompt = scene["video_prompt"]
+        duration = float(scene.get("duration_hint", 5.0) or 5.0)
+
+        log.info("   🌊 Scene %d: Requesting SeaDance AI video generation...", i + 1)
+        ok = await _generate_openrouter_seedance_video(prompt, clip_path)
+
+        if not ok:
+            log.warning("   ⚠️ SeaDance generation failed for Scene %d; falling back to FLUX motion clip...", i + 1)
+            img_path = scenes_dir / f"scene_{i+1:02d}.jpg"
+            await _fetch_scene_image(prompt, img_path, i)
+            motion_styles = ["zoom_in", "pan_right", "zoom_out", "pan_left", "zoom_in"]
+            style = motion_styles[i % len(motion_styles)]
+            await asyncio.to_thread(_create_motion_clip_sync, img_path, clip_path, duration, style)
+
+        clip_paths.append(clip_path)
+
+    stitched_path = await asyncio.to_thread(_stitch_clips_sync, clip_paths, output_path)
+    return stitched_path
+
+
 # ── Main Video Generator Dispatcher ──────────────────────────────────────
 
 async def generate_video(
@@ -596,6 +719,12 @@ async def generate_video(
     scenes_list = scenes or [{"video_prompt": prompt or "mythological folklore legend", "duration_hint": 5.0}]
 
     engine = (cfg.visual_engine or "motion_image").lower().strip()
+
+    if engine in ("seedance", "bytedance", "openrouter_video"):
+        return await generate_multi_scene_seedance_video(
+            scenes=scenes_list,
+            output_path=output_path,
+        )
 
     if engine == "gradio":
         return await generate_multi_scene_video(
