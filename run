@@ -1,0 +1,8 @@
+run once
+- python -m instagram_reel_bot --once
+
+
+run whole
+- python -m instagram_reel_bot
+
+

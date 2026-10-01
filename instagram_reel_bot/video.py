@@ -667,9 +667,12 @@ async def generate_multi_scene_seedance_video(
     output_path: Path | None = None,
 ) -> Path:
     """
-    ByteDance SeaDance Video Engine via OpenRouter:
-      1. Generates authentic AI video clips directly for each scene using bytedance/seedance-2.0-fast.
-      2. If any clip fails, seamlessly falls back to FLUX + Ken Burns motion.
+    Hybrid Video Engine — Motion Image PRIMARY, SeaDance SECONDARY:
+      1. PRIMARY: Fetches a FLUX AI image for each scene, applies Ken Burns motion (zoom/pan).
+         Fast, free, no quota limits, always works.
+      2. SECONDARY (optional upgrade): Attempts SeaDance AI video per scene.
+         If SeaDance succeeds it replaces the motion clip for that scene.
+         If it fails (copyright, timeout, etc.) the motion clip is kept silently.
       3. Stitches all clips together with smooth crossfades.
     """
     if output_path is None:
@@ -679,26 +682,43 @@ async def generate_multi_scene_seedance_video(
     scenes_dir = run_dir / "scenes"
     scenes_dir.mkdir(parents=True, exist_ok=True)
 
-    log.info("🎬 Launching ByteDance SeaDance AI Video Engine for %d scenes...", len(scenes))
+    log.info("🌟 Launching Hybrid Video Engine (Motion PRIMARY + SeaDance SECONDARY) for %d scenes...", len(scenes))
 
+    motion_styles = ["zoom_in", "pan_right", "zoom_out", "pan_left", "zoom_in"]
     clip_paths: list[Path] = []
-    for i, scene in enumerate(scenes):
+
+    # Step 1: Fetch all scene images concurrently (PRIMARY — always runs)
+    log.info("   🎨 Step 1/3: Fetching FLUX AI images for all scenes...")
+    image_tasks = [
+        _fetch_scene_image(scene["video_prompt"], scenes_dir / f"scene_{i+1:02d}.jpg", i)
+        for i, scene in enumerate(scenes)
+    ]
+    image_paths = await asyncio.gather(*image_tasks)
+
+    # Step 2: Render motion clips from images (PRIMARY)
+    log.info("   🎥 Step 2/3: Rendering Ken Burns motion clips...")
+    for i, (img_path, scene) in enumerate(zip(image_paths, scenes)):
         clip_path = scenes_dir / f"scene_{i+1:02d}.mp4"
-        prompt = scene["video_prompt"]
+        style = motion_styles[i % len(motion_styles)]
         duration = float(scene.get("duration_hint", 5.0) or 5.0)
-
-        log.info("   🌊 Scene %d: Requesting SeaDance AI video generation...", i + 1)
-        ok = await _generate_openrouter_seedance_video(prompt, clip_path)
-
-        if not ok:
-            log.warning("   ⚠️ SeaDance generation failed for Scene %d; falling back to FLUX motion clip...", i + 1)
-            img_path = scenes_dir / f"scene_{i+1:02d}.jpg"
-            await _fetch_scene_image(prompt, img_path, i)
-            motion_styles = ["zoom_in", "pan_right", "zoom_out", "pan_left", "zoom_in"]
-            style = motion_styles[i % len(motion_styles)]
-            await asyncio.to_thread(_create_motion_clip_sync, img_path, clip_path, duration, style)
-
+        log.info("      Scene %d: %s (%.1fs)", i + 1, style, duration)
+        await asyncio.to_thread(_create_motion_clip_sync, img_path, clip_path, duration, style)
         clip_paths.append(clip_path)
+
+    # Step 3: SeaDance AI upgrade — DISABLED (re-enable by setting VISUAL_ENGINE=seedance and uncommenting)
+    # log.info("   🌊 Step 3/3: Attempting SeaDance AI upgrade per scene (fails silently)...")
+    # for i, scene in enumerate(scenes):
+    #     clip_path = scenes_dir / f"scene_{i+1:02d}.mp4"
+    #     seedance_path = scenes_dir / f"scene_{i+1:02d}_seedance.mp4"
+    #     prompt = scene["video_prompt"]
+    #     ok = await _generate_openrouter_seedance_video(prompt, seedance_path)
+    #     if ok and seedance_path.exists():
+    #         seedance_path.replace(clip_path)
+    #         log.info("      ✅ Scene %d upgraded to SeaDance AI video", i + 1)
+    #     else:
+    #         log.info("      ⏭️  Scene %d keeping motion clip (SeaDance unavailable)", i + 1)
+    #         if seedance_path.exists():
+    #             seedance_path.unlink(missing_ok=True)
 
     stitched_path = await asyncio.to_thread(_stitch_clips_sync, clip_paths, output_path)
     return stitched_path
@@ -715,7 +735,11 @@ async def generate_video(
 ) -> Path:
     """
     Main visual entrypoint.
-    Dispatches to the configured visual engine with full fallback resilience.
+    Dispatches to the configured visual engine:
+
+      motion_image (default) — FLUX AI images + Ken Burns camera motion. Fast, free, reliable.
+      seedance               — Motion image PRIMARY + SeaDance AI as optional upgrade per scene.
+      gradio                 — Hugging Face Gradio Space video generation.
     """
     if fast_test:
         return await generate_fast_test_video(output_path)
@@ -724,8 +748,11 @@ async def generate_video(
 
     engine = (cfg.visual_engine or "motion_image").lower().strip()
 
+    # seedance engine is currently DISABLED — falls through to pure motion_image
+    # To re-enable SeaDance, uncomment Step 3 in generate_multi_scene_seedance_video above
     if engine in ("seedance", "bytedance", "openrouter_video"):
-        return await generate_multi_scene_seedance_video(
+        log.info("🔕 SeaDance engine disabled — using motion_image instead.")
+        return await generate_multi_scene_motion_video(
             scenes=scenes_list,
             output_path=output_path,
         )
@@ -737,7 +764,7 @@ async def generate_video(
             output_path=output_path,
         )
 
-    # Default engine: motion_image (FLUX 9:16 + Ken Burns camera moves)
+    # Default: pure motion_image (FLUX 9:16 + Ken Burns — no SeaDance attempt)
     return await generate_multi_scene_motion_video(
         scenes=scenes_list,
         output_path=output_path,
