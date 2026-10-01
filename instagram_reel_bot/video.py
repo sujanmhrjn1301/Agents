@@ -226,7 +226,11 @@ async def _generate_openrouter_seedance_video(
     }
     payload = {
         "model": model_name,
-        "prompt": f"{prompt}, 9:16 vertical composition, cinematic 8k masterpiece",
+        "prompt": (
+            f"{prompt}, 9:16 vertical composition, cinematic 8k masterpiece, "
+            "silent video no audio no music no sound, visuals only"
+        ),
+        "audio": False,  # Disable audio — we stitch our own voiceover; avoids copyright filter errors
     }
 
     try:
