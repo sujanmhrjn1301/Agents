@@ -3,6 +3,6 @@ run once
 
 
 run whole
-- python -m instagram_reel_bot
+python -m instagram_reel_bot
 
 
