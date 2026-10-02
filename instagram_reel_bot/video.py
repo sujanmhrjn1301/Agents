@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 import numpy as np
 from moviepy import VideoClip, VideoFileClip, concatenate_videoclips
 
@@ -354,6 +354,49 @@ async def _fetch_scene_image(
 
     return output_path
 
+# ── Image Fitting (no stretching) ─────────────────────────────────────────
+
+def _fit_image_to_frame(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """
+    Fit an image into target dimensions WITHOUT stretching.
+    Maintains the original aspect ratio and fills any empty space
+    with a heavily blurred version of the image itself (cinematic look).
+    """
+    src_w, src_h = img.size
+    target_ratio = target_w / target_h
+    src_ratio = src_w / src_h
+
+    # If already the correct size, return as-is
+    if src_w == target_w and src_h == target_h:
+        return img
+
+    # If aspect ratios are close enough (within 5%), just resize directly
+    if abs(src_ratio - target_ratio) < 0.05:
+        return img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    # Create blurred background: stretch original to fill frame, then blur heavily
+    bg = img.resize((target_w, target_h), Image.Resampling.BILINEAR)
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=40))
+
+    # Scale the foreground image to fit inside the frame (maintain aspect ratio)
+    if src_ratio > target_ratio:
+        # Image is wider than frame → fit to width
+        new_w = target_w
+        new_h = int(target_w / src_ratio)
+    else:
+        # Image is taller than frame → fit to height
+        new_h = target_h
+        new_w = int(target_h * src_ratio)
+
+    fg = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    # Center the foreground on the blurred background
+    x_offset = (target_w - new_w) // 2
+    y_offset = (target_h - new_h) // 2
+    bg.paste(fg, (x_offset, y_offset))
+
+    return bg
+
 
 # ── Ken Burns Motion Clip Generator ───────────────────────────────────────
 
@@ -369,10 +412,9 @@ def _create_motion_clip_sync(
     """
     w, h = cfg.video_width, cfg.video_height
 
-    # Load and normalize image size
+    # Load and normalize image — FIT to frame with blurred background (no stretching)
     base_pil = Image.open(str(image_path)).convert("RGB")
-    if base_pil.size != (w, h):
-        base_pil = base_pil.resize((w, h), Image.Resampling.LANCZOS)
+    base_pil = _fit_image_to_frame(base_pil, w, h)
 
     def make_frame(t: float) -> np.ndarray:
         progress = min(max(t / duration, 0.0), 1.0)
